@@ -1,2 +1,0 @@
-player_1:136
-player_2:146
