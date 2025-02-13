@@ -1,0 +1,13 @@
+ursina
+pyobjc
+screeninfo
+pyautogui
+opencv-python
+mediapipe
+numpy
+pillow
+fastapi
+uvicorn
+watchdog
+'uvicorn[standard]'
+websockets
