@@ -14,7 +14,7 @@ scores = {"player_1": "0", "player_2": "0"}  # Changed from player1/player2 to p
 
 async def handle_tcp_connections(websockets_set):
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.bind(('', 8080))
+    server.bind(('0.0.0.0', 8080))
     server.listen(5)
     server.setblocking(False)
 
