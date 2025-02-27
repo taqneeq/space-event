@@ -2,13 +2,8 @@ from ursina import *
 from random import randint, choice, sample
 import time
 import os
-import sys 
+import sys
 from subprocess import call
-import json
-import websockets
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
-import socket
 
 from email.mime import audio
 from ursina import *
@@ -17,27 +12,30 @@ import time
 import cv2
 import mediapipe as mp
 import numpy as np
+from threading import Thread
 import threading
 from PIL import Image
 import io
 from multiprocessing import Process, Value
 import ctypes
+import socket
+import websockets
+import json
+import asyncio
+from websockets.exceptions import WebSocketException
 
 # Set environment variable to skip camera authorization request
 os.environ["OPENCV_AVFOUNDATION_SKIP_AUTH"] = "1"
 
-# Initialize MediaPipe
-mp_hands = mp.solutions.hands
-hands = mp_hands.Hands(
-    max_num_hands=2,
-    min_detection_confidence=0.7,
-    min_tracking_confidence=0.5
-)
+mp_pose = mp.solutions.pose
+pose = mp_pose.Pose(min_detection_confidence=0.7, min_tracking_confidence=0.5)
 mp_draw = mp.solutions.drawing_utils
 
 # Add these global variables near the start
 running = True
 cap = None
+player_id = "player_1"  # This file will be for player 1
+ws_client = None
 
 # MacOS-specific camera permission handling
 def check_camera_permission():
@@ -82,7 +80,7 @@ class CameraPreview(Entity):
         self.position = Vec2(0.7, 0.3)
         self.always_on_top = True
 
-class HandGestureController:
+class GestureController:
     def __init__(self):
         self.running = Value(ctypes.c_bool, True)
         self.movement = Value(ctypes.c_int, 0)  # -1 for left, 0 for neutral, 1 for right
@@ -98,10 +96,6 @@ class HandGestureController:
                 print("Failed to open camera")
                 return
 
-            cv2.namedWindow('Hand Controls', cv2.WINDOW_NORMAL)
-            cv2.resizeWindow('Hand Controls', 400, 300)
-            cv2.moveWindow('Hand Controls', 100, 100)
-
             while running.value:
                 success, image = cap.read()
                 if not success:
@@ -111,68 +105,74 @@ class HandGestureController:
                 image = cv2.flip(image, 1)
                 image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
                 
-                results = hands.process(image_rgb)
+                # Process pose landmarks
+                pose_results = pose.process(image_rgb)
+
+                # Process hand landmarks for shooting
+                hand_results = hands.process(image_rgb)
 
                 h, w, _ = image.shape
-                # Draw control zone lines
-                left_boundary = w * 0.3
-                right_boundary = w * 0.7
-                
+                left_boundary = w * 0.35
+                right_boundary = w * 0.65
+
                 cv2.line(image, (int(left_boundary), 0), (int(left_boundary), h), (255, 0, 0), 2)
                 cv2.line(image, (int(right_boundary), 0), (int(right_boundary), h), (255, 0, 0), 2)
 
-                # Reset to center if no hands detected
-                if not results.multi_hand_landmarks:
-                    movement.value = 0  # Center position
-                    shoot.value = False
+                # Shoulder-based movement detection
+                if pose_results.pose_landmarks:
+                    landmarks = pose_results.pose_landmarks.landmark
+                    left_shoulder = landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER]
+                    right_shoulder = landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER]
+                    
+                    # Calculate the midpoint of the shoulders
+                    shoulder_midpoint = (left_shoulder.x + right_shoulder.x) / 2
+                    mid_x = int((left_shoulder.x + right_shoulder.x) * image.shape[1] / 2)
+                    mid_y = int((left_shoulder.y + right_shoulder.y) * image.shape[0] / 2)
 
-                if results.multi_hand_landmarks:
-                    # Process single hand controls
-                    hand_landmarks = results.multi_hand_landmarks[0]
+                     # Draw a plus sign at the midpoint
+                    line_length = 10  
+                    color = (0, 255, 0) 
+                    thickness = 2  
+
+                    # Horizontal line of the plus sign
+                    cv2.line(image, (mid_x - line_length, mid_y), (mid_x + line_length, mid_y), color, thickness)
+                    # Vertical line of the plus sign
+                    cv2.line(image, (mid_x, mid_y - line_length), (mid_x, mid_y + line_length), color, thickness)
+
+                    if shoulder_midpoint < 0.35:  # Left zone
+                        movement.value = -1
+                    elif shoulder_midpoint > 0.65:  # Right zone
+                        movement.value = 1
+                    else:  # Center zone
+                        movement.value = 0
+
+                # Hand gesture shooting
+                if hand_results.multi_hand_landmarks:
+                    hand_landmarks = hand_results.multi_hand_landmarks[0]
                     mp_draw.draw_landmarks(
                         image,
                         hand_landmarks,
                         mp_hands.HAND_CONNECTIONS
                     )
 
-                    # Get wrist and middle finger tip for hand raise detection
-                    wrist = hand_landmarks.landmark[mp_hands.HandLandmark.WRIST]
-                    middle_tip = hand_landmarks.landmark[mp_hands.HandLandmark.MIDDLE_FINGER_TIP]
-                    index_tip = hand_landmarks.landmark[mp_hands.HandLandmark.INDEX_FINGER_TIP]
+                    # Shooting gesture (pinch detection)
                     thumb_tip = hand_landmarks.landmark[mp_hands.HandLandmark.THUMB_TIP]
+                    index_tip = hand_landmarks.landmark[mp_hands.HandLandmark.INDEX_FINGER_TIP]
 
-                    # Check if hand is raised (middle finger tip above wrist)
-                    hand_raised = middle_tip.y < wrist.y - 0.1  # Added threshold for more reliable detection
-                    
-                    # Determine position based on raised hand position
-                    x_pos = index_tip.x
-                    if hand_raised:
-                        if x_pos < 0.3:  # Left zone
-                            movement.value = -1
-                        elif x_pos > 0.7:  # Right zone
-                            movement.value = 1
-                    else:
-                        movement.value = 0  # Return to center when hand is lowered
-
-                    # Process pinch for shooting
                     pinch_distance = np.sqrt(
                         (thumb_tip.x - index_tip.x)**2 +
                         (thumb_tip.y - index_tip.y)**2
                     )
-                    shoot.value = pinch_distance < 0.1
+                    shoot.value = pinch_distance < 0.1  # Set shoot value based on pinch distance
 
-                    # Add visual indicators
-                    position_text = "LEFT" if movement.value == -1 else "RIGHT" if movement.value == 1 else "CENTER"
-                    cv2.putText(image, f"Position: {position_text}", (w//2 - 50, 30),
-                              cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
-                    cv2.putText(image, f"Hand Raised: {hand_raised}", (10, 120),
-                              cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-
-                # Add visual feedback for shooting
+                # Visual feedback
+                position_text = "LEFT" if movement.value == -1 else "RIGHT" if movement.value == 1 else "CENTER"
+                cv2.putText(image, f"Position: {position_text}", (10, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
                 cv2.putText(image, f"Shoot: {shoot.value}", (10, 60),
-                          cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-                cv2.imshow('Hand Controls', image)
+                cv2.imshow('Shoulder Controls', image)
                 if cv2.waitKey(1) & 0xFF == 27:
                     running.value = False
 
@@ -184,7 +184,7 @@ class HandGestureController:
             if cap is not None:
                 cap.release()
             cv2.destroyAllWindows()
-
+    
     def start(self):
         self.process = Process(target=self.camera_process, 
                              args=(self.running, self.movement, self.shoot, self.restart))
@@ -197,43 +197,35 @@ class HandGestureController:
 
 class WebSocketClient:
     def __init__(self):
-        self.uri = "ws://0.tcp.in.ngrok.io:12989/ws"  # Updated to use ngrok server
-        self.websocket = None
+        self.ws = None
         self.running = True
-        self.thread = threading.Thread(target=self.run_websocket_client)
-        self.thread.daemon = True
+        self.thread = None
 
     async def connect(self):
         try:
-            self.websocket = await websockets.connect(self.uri)
-            print("Connected to WebSocket server")
+            self.ws = await websockets.connect('ws://localhost:8000/ws')
             while self.running:
                 try:
-                    message = await self.websocket.recv()
-                    if message == "reset_acknowledged":
-                        print("Received reset command")
-                        invoke(restart_game)
-                except websockets.ConnectionClosed:
-                    print("WebSocket connection closed. Attempting to reconnect...")
-                    try:
-                        self.websocket = await websockets.connect(self.uri)
-                        print("Reconnected to WebSocket server")
-                    except:
-                        print("Failed to reconnect")
-                        break
+                    message = await self.ws.recv()
+                    # Handle incoming messages if needed
+                    print(f"Received: {message}")
+                except WebSocketException:
+                    break
+                await asyncio.sleep(0.1)
         except Exception as e:
             print(f"WebSocket error: {e}")
-
-    def run_websocket_client(self):
-        asyncio.run(self.connect())
+        finally:
+            if self.ws:
+                await self.ws.close()
 
     def start(self):
+        self.thread = Thread(target=lambda: asyncio.run(self.connect()))
         self.thread.start()
 
     def stop(self):
         self.running = False
-        if self.websocket:
-            asyncio.run(self.websocket.close())
+        if self.thread:
+            self.thread.join()
 
 def restart_game():
     global score, game_over, bullet_count, current_lane, invaders, bullets, ammo
@@ -284,20 +276,6 @@ def restart_game():
     # Destroy the collected entities
     for entity in entities_to_destroy:
         destroy(entity)
-    
-    # Reset score in player file
-    if 'player_id' in globals():
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            host = '0.tcp.in.ngrok.io'
-            port = 12989
-            sock.connect((host, port))
-            score_data = f"player_id:{score}"
-            sock.send(bytes(score_data, 'utf-8'))
-            sock.close()
-        except Exception as e:
-            print(f"Error sending score: {e}")
-
 
 def update():
     global invaders, bullets, score, last_time, game_over, locked_lane, max_bullets, bullet_count, controller, current_lane
@@ -352,19 +330,6 @@ def update():
             bullet.x = 10
             score += 10
             score_text.text = f"Score: {score}"
-            
-            # Update score file immediately when score changes
-            if 'player_id' in globals():
-                try:
-                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    host = '0.tcp.in.ngrok.io'
-                    port = 12989
-                    sock.connect((host, port))
-                    score_data = f"{player_id}:{score}"
-                    sock.send(bytes(score_data, 'utf-8'))
-                    sock.close()
-                except Exception as e:
-                    print(f"Error sending score: {e}")
 
             if hit_info.entity in invaders:
                 reset_invader(hit_info.entity)
@@ -383,42 +348,36 @@ def update():
                 bullet_count = min(bullet_count, max_bullets)
                 invoke(reset_ammo, ammo_item, delay=0.5)
 
-    # Increment score and update files
+    # Increment score
     current_time = time.time()
     if current_time - last_time >= 1:
         score += 12
         score_text.text = f"Score: {score}"
         last_time = current_time
         
-        # Update player-specific score file
-        if 'player_id' in globals():
-            try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                host = '0.tcp.in.ngrok.io'
-                port = 12989
-                sock.connect((host, port))
-                score_data = f"{player_id}:{score}"
-                sock.send(bytes(score_data, 'utf-8'))
-                sock.close()
-            except Exception as e:
-                print(f"Error sending score: {e}")
-
+        # Send score update to server
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            host = 'ws://0.tcp.in.ngrok.io:12989/ws'
+            port = 12989
+            sock.connect((host, port))
+            score_data = f"{player_id}:{score}"
+            sock.send(bytes(score_data, 'utf-8'))
+            sock.close()
+        except Exception as e:
+            print(f"Error sending score: {e}")
 
 def main():
-    global controller, player_id, ws_client
-    
-    # Set fixed player_id instead of requesting one
-    player_id = "player_1"  # This file will always be player 1
-    print(f"Game started as {player_id}")
+    global controller, ws_client
     
     # Initialize score file
     with open(f'scores_{player_id}.txt', 'w') as f:
         f.write('0')
     
-    controller = HandGestureController()
+    # Initialize controller and WebSocket client
+    controller = GestureController()
     controller.start()
     
-    # Initialize WebSocket client
     ws_client = WebSocketClient()
     ws_client.start()
     
@@ -429,6 +388,13 @@ def main():
     finally:
         ws_client.stop()
         controller.stop()
+
+if __name__ == "__main__":
+    if check_camera_permission():
+        print(f"Game started as {player_id}")
+        main()
+    else:
+        print("Please grant camera permission and restart the application")
 
 def input(key):
     global current_lane, bullet_count
@@ -479,40 +445,24 @@ def reset_ammo(ammo_item):
 
 
 def end_game():
-    """End the game and display the Game Over screen"""
+    """End the game and display the Game Over screen."""
     global game_over
     game_over = True
 
-    # Display Game Over message and final score
+    # Display messages
     Text(text='Game Over', origin=(0, 0), scale=3, color=color.red, position=(0, 0.1), background=True, font=custom_font)
     Text(text=f'Final Score: {score}', origin=(0, 0), scale=2, color=color.yellow, position=(0, -0.1), background=True, font=custom_font)
     Text(text='Press R to Restart', origin=(0, 0), scale=2, color=color.green, position=(0, -0.3), background=True, font=custom_font)
 
-    # Update score file with final score
+    # Update score files and send final score
     try:
-        with open('scorekeeper.txt', 'r') as f:
-            scores = {}
-            for line in f:
-                if ':' in line:
-                    pid, pscore = line.strip().split(':')
-                    scores[pid] = pscore
-    except FileNotFoundError:
-        scores = {}
-    
-    scores[player_id] = str(score)
-    
-    with open('scorekeeper.txt', 'w') as f:
-        for pid, pscore in scores.items():
-            f.write(f"{pid}:{pscore}\n")
-    
-    # Write final score to player-specific file
-    with open(f'scores_{player_id}.txt', 'w') as f:
-        f.write(str(score))
-    
-    # Send final score to server
-    try:
+        # Update local score file
+        with open(f'scores_{player_id}.txt', 'w') as f:
+            f.write(str(score))
+            
+        # Send final score to server
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        host = '0.tcp.in.ngrok.io'
+        host = '0.tcp.in.ngrok.io'  # Update with your ngrok URL
         port = 12989
         sock.connect((host, port))
         score_data = f"{player_id}:{score}"
@@ -619,6 +569,7 @@ camera.rotation_x = -56
 
 if __name__ == "__main__":
     if check_camera_permission():
+        print(f"Game started as {player_id}")
         main()
     else:
         print("Please grant camera permission and restart the application")

@@ -18,6 +18,11 @@ from PIL import Image
 import io
 from multiprocessing import Process, Value
 import ctypes
+import socket
+import websockets
+import json
+import asyncio
+from websockets.exceptions import WebSocketException
 
 # Set environment variable to skip camera authorization request
 os.environ["OPENCV_AVFOUNDATION_SKIP_AUTH"] = "1"
@@ -29,6 +34,8 @@ mp_draw = mp.solutions.drawing_utils
 # Add these global variables near the start
 running = True
 cap = None
+player_id = "player_2"  # This file will be for player 1
+ws_client = None
 
 # MacOS-specific camera permission handling
 def check_camera_permission():
@@ -188,6 +195,38 @@ class GestureController:
         if self.process:
             self.process.join()
 
+class WebSocketClient:
+    def __init__(self):
+        self.ws = None
+        self.running = True
+        self.thread = None
+
+    async def connect(self):
+        try:
+            self.ws = await websockets.connect('ws://localhost:8000/ws')
+            while self.running:
+                try:
+                    message = await self.ws.recv()
+                    # Handle incoming messages if needed
+                    print(f"Received: {message}")
+                except WebSocketException:
+                    break
+                await asyncio.sleep(0.1)
+        except Exception as e:
+            print(f"WebSocket error: {e}")
+        finally:
+            if self.ws:
+                await self.ws.close()
+
+    def start(self):
+        self.thread = Thread(target=lambda: asyncio.run(self.connect()))
+        self.thread.start()
+
+    def stop(self):
+        self.running = False
+        if self.thread:
+            self.thread.join()
+
 def restart_game():
     global score, game_over, bullet_count, current_lane, invaders, bullets, ammo
     
@@ -315,18 +354,47 @@ def update():
         score += 12
         score_text.text = f"Score: {score}"
         last_time = current_time
+        
+        # Send score update to server
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            host = 'ws://0.tcp.in.ngrok.io:12989/ws'
+            port = 12989
+            sock.connect((host, port))
+            score_data = f"{player_id}:{score}"
+            sock.send(bytes(score_data, 'utf-8'))
+            sock.close()
+        except Exception as e:
+            print(f"Error sending score: {e}")
 
 def main():
-    global controller
+    global controller, ws_client
+    
+    # Initialize score file
+    with open(f'scores_{player_id}.txt', 'w') as f:
+        f.write('0')
+    
+    # Initialize controller and WebSocket client
     controller = GestureController()
     controller.start()
+    
+    ws_client = WebSocketClient()
+    ws_client.start()
     
     try:
         app.run()
     except Exception as e:
         print(f"Game error: {e}")
     finally:
+        ws_client.stop()
         controller.stop()
+
+if __name__ == "__main__":
+    if check_camera_permission():
+        print(f"Game started as {player_id}")
+        main()
+    else:
+        print("Please grant camera permission and restart the application")
 
 def input(key):
     global current_lane, bullet_count
@@ -381,8 +449,27 @@ def end_game():
     global game_over
     game_over = True
 
-    Text(text='Game Over', origin=(0, 0), scale=3, color=color.red, position=(0, 0.1), background=True,font=custom_font)
-    Text(text=f'Final Score: {score}', origin=(0, 0), scale=2, color=color.yellow, position=(0, -0.1), background=True,font=custom_font)
+    # Display messages
+    Text(text='Game Over', origin=(0, 0), scale=3, color=color.red, position=(0, 0.1), background=True, font=custom_font)
+    Text(text=f'Final Score: {score}', origin=(0, 0), scale=2, color=color.yellow, position=(0, -0.1), background=True, font=custom_font)
+    Text(text='Press R to Restart', origin=(0, 0), scale=2, color=color.green, position=(0, -0.3), background=True, font=custom_font)
+
+    # Update score files and send final score
+    try:
+        # Update local score file
+        with open(f'scores_{player_id}.txt', 'w') as f:
+            f.write(str(score))
+            
+        # Send final score to server
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        host = '0.tcp.in.ngrok.io'  # Update with your ngrok URL
+        port = 12989
+        sock.connect((host, port))
+        score_data = f"{player_id}:{score}"
+        sock.send(bytes(score_data, 'utf-8'))
+        sock.close()
+    except Exception as e:
+        print(f"Error updating final score: {e}")
 
 
 class Invader(Entity):
@@ -482,6 +569,7 @@ camera.rotation_x = -56
 
 if __name__ == "__main__":
     if check_camera_permission():
+        print(f"Game started as {player_id}")
         main()
     else:
         print("Please grant camera permission and restart the application")
