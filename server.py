@@ -25,7 +25,7 @@ async def handle_tcp_connections(websockets_set):
             
             if data:
                 message = data.decode('utf-8').strip()
-                print(message)
+                # print(message)
                 # Remove the slot request handling since we're using fixed IDs
                 if ":" in message:
                     # Handle score updates
