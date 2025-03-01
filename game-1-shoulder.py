@@ -203,7 +203,7 @@ class WebSocketClient:
 
     async def connect(self):
         try:
-            self.ws = await websockets.connect('ws://localhost:8000/ws')
+            self.ws = await websockets.connect('ws://localhost:8000/ws') #check this
             while self.running:
                 try:
                     message = await self.ws.recv()
@@ -358,8 +358,8 @@ def update():
         # Send score update to server
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            host = 'ws://0.tcp.in.ngrok.io:12989/ws'
-            port = 12989
+            host = '0.tcp.in.ngrok.io:15355'
+            port = 15355
             sock.connect((host, port))
             score_data = f"{player_id}:{score}"
             sock.send(bytes(score_data, 'utf-8'))
@@ -463,7 +463,7 @@ def end_game():
         # Send final score to server
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         host = '0.tcp.in.ngrok.io'  # Update with your ngrok URL
-        port = 12989
+        port = 15355
         sock.connect((host, port))
         score_data = f"{player_id}:{score}"
         sock.send(bytes(score_data, 'utf-8'))
