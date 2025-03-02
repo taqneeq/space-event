@@ -358,7 +358,7 @@ def update():
         # Send score update to server
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            host = 'ws://0.tcp.in.ngrok.io:12989/ws'
+            host = '0.tcp.in.ngrok.io'
             port = 12989
             sock.connect((host, port))
             score_data = f"{player_id}:{score}"

@@ -6,3 +6,4 @@
 
 4. Make sure fastapi and ngrok are on 2 different ports
 
+`ngrok tcp 8080`
