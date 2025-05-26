@@ -253,7 +253,7 @@ def restart_game():
     ammo.clear()
     
     # Create new invaders
-    for i in range(5):
+    for i in range(10):
         invader = Invader()
         invaders.append(invader)
     
@@ -359,7 +359,7 @@ def update():
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             host = '0.tcp.in.ngrok.io'
-            port = 15355
+            port = 10671
             sock.connect((host, port))
             score_data = f"{player_id}:{score}"
             sock.send(bytes(score_data, 'utf-8'))
@@ -425,16 +425,34 @@ def reset_invader(invader):
     """Reset the position of an invader."""
     global locked_lane
 
-    available_lanes = list(lanes)
-    if locked_lane in available_lanes:
-        available_lanes.remove(locked_lane)
-
-    selected_lanes = sample(available_lanes, 2)  # Randomly pick 2 out of the 3 lanes
-    invader.x = choice(selected_lanes)  # Place invader in one of the selected lanes
+    # Count invaders in each lane
+    invaders_per_lane = {lane: 0 for lane in lanes}
+    for inv in invaders:
+        if inv != invader and inv.y > -0.5:  # Only count active invaders
+            if inv.x in lanes:
+                invaders_per_lane[inv.x] += 1
+    
+    # First check if any lane is empty - prioritize placing in empty lanes
+    empty_lanes = [lane for lane, count in invaders_per_lane.items() if count == 0]
+    
+    if empty_lanes:
+        # Place invader in a random empty lane to ensure distribution
+        invader.x = choice(empty_lanes)
+    else:
+        # If all lanes have invaders, find the lane with fewest invaders
+        min_count = min(invaders_per_lane.values())
+        least_populated_lanes = [lane for lane, count in invaders_per_lane.items() if count == min_count]
+        invader.x = choice(least_populated_lanes)
+    
+    # Set a random height above the visible area
     invader.y = randint(80, 120) * 0.01
-
-    locked_lane = list(set(lanes) - set(selected_lanes))[0]
-    locked_until[locked_lane] = time.time() + randint(3, 5)  # Lock the lane for 3-5 seconds
+    
+    # Reset any locked lane flags if needed
+    locked_lane = None
+    for lane in lanes:
+        if time.time() < locked_until[lane]:
+            locked_lane = lane
+            break
 
 
 def reset_ammo(ammo_item):
@@ -463,7 +481,7 @@ def end_game():
         # Send final score to server
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         host = '0.tcp.in.ngrok.io'  # Update with your ngrok URL
-        port = 15355
+        port = 10671
         sock.connect((host, port))
         score_data = f"{player_id}:{score}"
         sock.send(bytes(score_data, 'utf-8'))
@@ -481,7 +499,7 @@ class Invader(Entity):
         self.scale = 0.1
         self.position = (choice(lanes), randint(80, 120) * 0.01, -0.1)
         self.collider = 'box'
-        self.dy = -0.15
+        self.dy = -0.20
 
 
 class Player(Entity):
@@ -545,12 +563,12 @@ locked_until = {lane: 0 for lane in lanes}  # Track when each lane is unlocked
 player = Player()
 player.x = lanes[current_lane]  # Position player in the middle
 
-for i in range(5):  # Create 10 invaders
+for i in range(20):  # Create 10 invaders
     invader = Invader()
     invaders.append(invader)
 
 # Create ammo items randomly
-for i in range(3):
+for i in range(5):
     ammo_item = Ammo()
     ammo.append(ammo_item)
 
